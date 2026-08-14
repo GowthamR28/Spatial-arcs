@@ -27,6 +27,7 @@ interface FlowState {
   apiStatus: ApiStatus;
   datasetId: string | null;
   backendMode: boolean;
+  geo3D: boolean;
   maxNodesServer: number;
   meta: FlowMeta | null;
   canvasSize: { w: number; h: number };
@@ -46,6 +47,7 @@ interface FlowState {
   setApiStatus: (s: ApiStatus) => void;
   setDatasetId: (id: string | null) => void;
   setBackendMode: (b: boolean) => void;
+  setGeo3D: (b: boolean) => void;
   setPalette: (id: string) => void;
   setClassification: (m: ClassificationMethod) => void;
   recomputeLayouts: () => void;
@@ -82,6 +84,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   apiStatus: 'local',
   datasetId: null,
   backendMode: false,
+  geo3D: false,
   maxNodesServer: 400,
   meta: null,
   canvasSize: { w: 1000, h: 700 },
@@ -180,6 +183,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   setApiStatus: (s) => set({ apiStatus: s }),
   setDatasetId: (id) => set({ datasetId: id }),
   setBackendMode: (b) => set({ backendMode: b }),
+  setGeo3D: (b) => set({ geo3D: b }),
   setPalette: (id) => {
     set({ paletteId: id });
     get().recomputeLayouts();

@@ -154,6 +154,118 @@ void main() {
 }
 `;
 
+// --- 3D (orbit-camera) variants for Geo mode -------------------------------
+// Ground plane = geo (x, y) as (worldX, worldZ); routes arch upward into
+// worldY (height) based on distance — the same "distance-based arc height"
+// convention as the 2D renderer, just lifted into a third dimension instead
+// of screen Y. Reuses the exact same per-edge instance buffer; only the
+// vertex shaders differ (perspective projection instead of pixel math).
+const COMMON_3D_HEAD = `#version 300 es
+layout(location = 4) in vec2 aP0Geo;
+layout(location = 5) in vec2 aP1Geo;
+layout(location = 8) in vec3 aColor;
+layout(location = 9) in float aWidth;
+layout(location = 10) in float aSrcIdx;
+layout(location = 11) in float aTgtIdx;
+
+uniform mat4 uViewProj;
+uniform vec2 uResolution;
+uniform float uHoverIdx;
+uniform float uHeightScale;
+
+vec3 bezier3(vec3 p0, vec3 c, vec3 p1, float t) {
+  float mt = 1.0 - t;
+  return mt * mt * p0 + 2.0 * mt * t * c + t * t * p1;
+}
+`;
+
+const EDGE_VERT_3D_SRC = `${COMMON_3D_HEAD}
+layout(location = 0) in float aT;
+layout(location = 1) in float aSide;
+
+out vec3 vColor;
+out float vAlpha;
+
+void main() {
+  vec3 p0 = vec3(aP0Geo.x, 0.0, aP0Geo.y);
+  vec3 p1 = vec3(aP1Geo.x, 0.0, aP1Geo.y);
+  float dist = length(aP1Geo - aP0Geo);
+  vec3 mid = vec3((aP0Geo.x + aP1Geo.x) * 0.5, dist * uHeightScale, (aP0Geo.y + aP1Geo.y) * 0.5);
+
+  vec3 worldPos = bezier3(p0, mid, p1, aT);
+  vec3 tangent = normalize(2.0 * (1.0 - aT) * (mid - p0) + 2.0 * aT * (p1 - mid) + vec3(1e-6));
+
+  vec4 clip0 = uViewProj * vec4(worldPos, 1.0);
+  // Constant-pixel-width lines under perspective: project a second point
+  // just along the tangent, derive the on-screen direction from both, then
+  // offset in clip space scaled by w so the GPU's automatic perspective
+  // divide leaves a correct constant-width screen offset regardless of
+  // camera distance.
+  vec4 clip1 = uViewProj * vec4(worldPos + tangent * max(dist * 0.01, 1.0), 1.0);
+  vec2 screen0 = clip0.xy / clip0.w;
+  vec2 screen1 = clip1.xy / clip1.w;
+  vec2 dir2d = normalize(screen1 - screen0 + vec2(1e-6));
+  vec2 normal2d = vec2(-dir2d.y, dir2d.x);
+
+  vec2 offsetNdc = normal2d * (aWidth * 0.5) * aSide;
+  offsetNdc.x *= 2.0 / uResolution.x;
+  offsetNdc.y *= 2.0 / uResolution.y;
+
+  gl_Position = vec4(clip0.xy + offsetNdc * clip0.w, clip0.z, clip0.w);
+
+  float hot = (aSrcIdx == uHoverIdx || aTgtIdx == uHoverIdx) ? 1.0 : 0.0;
+  float somethingHovered = step(0.0, uHoverIdx);
+  float dimmed = somethingHovered * (1.0 - hot);
+  vAlpha = mix(mix(0.55, 1.0, hot), 0.018, dimmed);
+  vColor = aColor;
+}
+`;
+
+const PARTICLE_VERT_3D_SRC = `${COMMON_3D_HEAD}
+layout(location = 0) in vec2 aQuadPos;
+
+uniform float uTime;
+uniform float uPhaseOffset;
+
+out vec3 vColor;
+out float vAlpha;
+out vec2 vLocal;
+
+float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+void main() {
+  float h1 = hash(float(gl_InstanceID) * 0.0173 + 1.0);
+  float h2 = hash(float(gl_InstanceID) * 0.0281 + 7.0);
+  float speed = 0.05 + h2 * 0.09;
+  float t = fract(uTime * speed + h1 + uPhaseOffset);
+
+  vec3 p0 = vec3(aP0Geo.x, 0.0, aP0Geo.y);
+  vec3 p1 = vec3(aP1Geo.x, 0.0, aP1Geo.y);
+  float dist = length(aP1Geo - aP0Geo);
+  vec3 mid = vec3((aP0Geo.x + aP1Geo.x) * 0.5, dist * uHeightScale, (aP0Geo.y + aP1Geo.y) * 0.5);
+  vec3 worldPos = bezier3(p0, mid, p1, t);
+
+  vec4 clip = uViewProj * vec4(worldPos, 1.0);
+
+  float fade = sin(3.14159265 * t);
+  float hot = (aSrcIdx == uHoverIdx || aTgtIdx == uHoverIdx) ? 1.0 : 0.0;
+  float somethingHovered = step(0.0, uHoverIdx);
+  float dimmed = somethingHovered * (1.0 - hot);
+  float alphaMul = mix(1.0, 0.018, dimmed);
+
+  float r = (2.4 + aWidth * 0.7) * mix(1.0, 1.5, hot);
+  vec2 offsetNdc = aQuadPos * r;
+  offsetNdc.x *= 2.0 / uResolution.x;
+  offsetNdc.y *= 2.0 / uResolution.y;
+
+  gl_Position = vec4(clip.xy + offsetNdc * clip.w, clip.z, clip.w);
+
+  vColor = aColor;
+  vAlpha = clamp(fade, 0.0, 1.0) * alphaMul;
+  vLocal = aQuadPos;
+}
+`;
+
 function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
   const sh = gl.createShader(type)!;
   gl.shaderSource(sh, src);
@@ -213,16 +325,22 @@ export interface EdgeGLRenderer {
     blend: number; scale: number; tx: number; ty: number;
     width: number; height: number; hoverIdx: number; time: number;
   }): void;
+  draw3D(params: {
+    viewProj: Float32Array; heightScale: number;
+    width: number; height: number; hoverIdx: number; time: number;
+  }): void;
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
   destroy(): void;
 }
 
 export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer | null {
-  const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: true });
+  const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: true, depth: true });
   if (!gl) return null; // caller falls back gracefully if WebGL2 isn't available
 
   const edgeProgram = linkProgram(gl, EDGE_VERT_SRC, EDGE_FRAG_SRC);
   const particleProgram = linkProgram(gl, PARTICLE_VERT_SRC, PARTICLE_FRAG_SRC);
+  const edge3dProgram = linkProgram(gl, EDGE_VERT_3D_SRC, EDGE_FRAG_SRC);
+  const particle3dProgram = linkProgram(gl, PARTICLE_VERT_3D_SRC, PARTICLE_FRAG_SRC);
 
   const edgeU = {
     blend: gl.getUniformLocation(edgeProgram, 'uBlend'),
@@ -239,6 +357,20 @@ export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer 
     hoverIdx: gl.getUniformLocation(particleProgram, 'uHoverIdx'),
     time: gl.getUniformLocation(particleProgram, 'uTime'),
     phaseOffset: gl.getUniformLocation(particleProgram, 'uPhaseOffset'),
+  };
+  const edge3dU = {
+    viewProj: gl.getUniformLocation(edge3dProgram, 'uViewProj'),
+    resolution: gl.getUniformLocation(edge3dProgram, 'uResolution'),
+    hoverIdx: gl.getUniformLocation(edge3dProgram, 'uHoverIdx'),
+    heightScale: gl.getUniformLocation(edge3dProgram, 'uHeightScale'),
+  };
+  const particle3dU = {
+    viewProj: gl.getUniformLocation(particle3dProgram, 'uViewProj'),
+    resolution: gl.getUniformLocation(particle3dProgram, 'uResolution'),
+    hoverIdx: gl.getUniformLocation(particle3dProgram, 'uHoverIdx'),
+    heightScale: gl.getUniformLocation(particle3dProgram, 'uHeightScale'),
+    time: gl.getUniformLocation(particle3dProgram, 'uTime'),
+    phaseOffset: gl.getUniformLocation(particle3dProgram, 'uPhaseOffset'),
   };
 
   // Shared "ribbon" template for edges: (SEGMENTS+1) steps along t, 2
@@ -273,6 +405,26 @@ export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer 
 
   const particleVao = gl.createVertexArray();
   gl.bindVertexArray(particleVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  bindInstanceAttribs(gl, instanceBuffer);
+  gl.bindVertexArray(null);
+
+  // 3D VAOs reuse the exact same ribbon/quad base geometry and the exact
+  // same instance buffer — only the shader programs differ.
+  const edge3dVao = gl.createVertexArray();
+  gl.bindVertexArray(edge3dVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, ribbonBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 8, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 8, 4);
+  bindInstanceAttribs(gl, instanceBuffer);
+  gl.bindVertexArray(null);
+
+  const particle3dVao = gl.createVertexArray();
+  gl.bindVertexArray(particle3dVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
@@ -339,6 +491,7 @@ export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer 
 
     draw({ blend, scale, tx, ty, width, height, hoverIdx, time }) {
       gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.disable(gl.DEPTH_TEST);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       if (instanceCount === 0) return;
@@ -372,6 +525,51 @@ export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer 
       gl.bindVertexArray(null);
     },
 
+    draw3D({ viewProj, heightScale, width, height, hoverIdx, time }) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (instanceCount === 0) {
+        gl.disable(gl.DEPTH_TEST);
+        return;
+      }
+
+      // Edges write depth — nearer arcs correctly occlude farther ones,
+      // which is what actually makes a "skyline of flow" read as a real 3D
+      // scene instead of a flat pile of translucent lines.
+      gl.depthMask(true);
+      gl.useProgram(edge3dProgram);
+      gl.bindVertexArray(edge3dVao);
+      gl.uniformMatrix4fv(edge3dU.viewProj, false, viewProj);
+      gl.uniform2f(edge3dU.resolution, width, height);
+      gl.uniform1f(edge3dU.hoverIdx, hoverIdx);
+      gl.uniform1f(edge3dU.heightScale, heightScale);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, vertsPerInstance, instanceCount);
+      gl.bindVertexArray(null);
+
+      // Particles test against that depth (so they still hide behind
+      // nearer arcs) but don't write it themselves, so overlapping glows
+      // blend together instead of harshly occluding each other.
+      gl.depthMask(false);
+      gl.useProgram(particle3dProgram);
+      gl.bindVertexArray(particle3dVao);
+      gl.uniformMatrix4fv(particle3dU.viewProj, false, viewProj);
+      gl.uniform2f(particle3dU.resolution, width, height);
+      gl.uniform1f(particle3dU.hoverIdx, hoverIdx);
+      gl.uniform1f(particle3dU.heightScale, heightScale);
+      gl.uniform1f(particle3dU.time, time);
+      gl.uniform1f(particle3dU.phaseOffset, 0.0);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instanceCount);
+      gl.uniform1f(particle3dU.phaseOffset, 0.5);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instanceCount);
+      gl.bindVertexArray(null);
+
+      gl.depthMask(true);
+      gl.disable(gl.DEPTH_TEST);
+    },
+
     resize(cssWidth, cssHeight, dpr) {
       canvas.width = Math.round(cssWidth * dpr);
       canvas.height = Math.round(cssHeight * dpr);
@@ -385,8 +583,12 @@ export function createEdgeGLRenderer(canvas: HTMLCanvasElement): EdgeGLRenderer 
       gl.deleteBuffer(instanceBuffer);
       gl.deleteVertexArray(edgeVao);
       gl.deleteVertexArray(particleVao);
+      gl.deleteVertexArray(edge3dVao);
+      gl.deleteVertexArray(particle3dVao);
       gl.deleteProgram(edgeProgram);
       gl.deleteProgram(particleProgram);
+      gl.deleteProgram(edge3dProgram);
+      gl.deleteProgram(particle3dProgram);
     },
   };
 }
