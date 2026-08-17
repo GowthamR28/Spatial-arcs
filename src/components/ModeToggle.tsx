@@ -12,6 +12,8 @@ export function ModeToggle() {
   const setMode = useFlowStore((s) => s.setMode);
   const geo3D = useFlowStore((s) => s.geo3D);
   const setGeo3D = useFlowStore((s) => s.setGeo3D);
+  const cinemaMode = useFlowStore((s) => s.cinemaMode);
+  const setCinemaMode = useFlowStore((s) => s.setCinemaMode);
 
   return (
     <div className="mode-toggle-row">
@@ -48,7 +50,30 @@ export function ModeToggle() {
             3D
           </motion.button>
         )}
+        {mode === 'geo' && (
+          <motion.button
+            key="cinema-toggle"
+            className={'geo3d-toggle cinema-toggle' + (cinemaMode ? ' active' : '')}
+            onClick={() => setCinemaMode(!cinemaMode)}
+            title="Auto Cinema — the camera flies itself, always framed on the data (c). Turns 3D on automatically."
+            initial={{ opacity: 0, scale: 0.85, x: -6 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.85, x: -6 }}
+            transition={{ duration: 0.18 }}
+          >
+            <CameraIcon />
+          </motion.button>
+        )}
       </AnimatePresence>
     </div>
+  );
+}
+
+function CameraIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M23 7l-7 5 7 5V7z" />
+      <rect x="1" y="5" width="15" height="14" rx="2" />
+    </svg>
   );
 }

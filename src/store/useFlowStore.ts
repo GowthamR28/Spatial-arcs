@@ -3,7 +3,7 @@ import type { FlowNode, FlowEdgeRaw, ViewMode, RawRow, FlowMeta } from '../lib/t
 import { computeLayouts, type Scales } from '../lib/layout';
 import { SAMPLE_ROWS } from '../data/sample';
 import type { WorkerResponse } from '../lib/csv.worker';
-import { DEFAULT_PALETTE_ID, getPalette } from '../lib/palettes';
+import { DEFAULT_PALETTE_ID, getPalette, PALETTES } from '../lib/palettes';
 import type { ClassificationMethod } from '../lib/classification';
 
 export type ApiStatus = 'local' | 'connecting' | 'connected' | 'error' | 'uploading' | 'upload-failed';
@@ -28,6 +28,9 @@ interface FlowState {
   datasetId: string | null;
   backendMode: boolean;
   geo3D: boolean;
+  // Set by clicking a node's bulb — when present, the canvas isolates to
+  // just that stop and the routes touching it (see FlowCanvas recompute).
+  selectedNodeId: string | null;
   maxNodesServer: number;
   meta: FlowMeta | null;
   canvasSize: { w: number; h: number };
@@ -35,6 +38,14 @@ interface FlowState {
   loadError: string | null;
   paletteId: string;
   classification: ClassificationMethod;
+  // "Play" animates topN counting up from 1 to the full dataset over a few
+  // seconds — a flow-build-up video instead of manually nudging the slider.
+  isPlaying: boolean;
+  // "Auto Cinema" — the 3D camera flies itself (slow orbit + gentle
+  // re-centering on whatever data is visible) instead of needing WASD/mouse
+  // input. Turning it on also switches into Geo+3D, since that's the only
+  // mode it applies to.
+  cinemaMode: boolean;
 
   ingest: (rows: RawRow[]) => void;
   ingestAggregated: (nodesArr: any[], edgesArr: any[], meta: FlowMeta) => void;
@@ -48,9 +59,14 @@ interface FlowState {
   setDatasetId: (id: string | null) => void;
   setBackendMode: (b: boolean) => void;
   setGeo3D: (b: boolean) => void;
+  setSelectedNode: (id: string | null) => void;
   setPalette: (id: string) => void;
+  cyclePalette: (dir: 1 | -1) => void;
   setClassification: (m: ClassificationMethod) => void;
   recomputeLayouts: () => void;
+  setIsPlaying: (b: boolean) => void;
+  stepTopN: (delta: number) => void;
+  setCinemaMode: (b: boolean) => void;
 }
 
 function buildFromRows(rows: RawRow[]) {
@@ -85,6 +101,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   datasetId: null,
   backendMode: false,
   geo3D: false,
+  selectedNodeId: null,
   maxNodesServer: 400,
   meta: null,
   canvasSize: { w: 1000, h: 700 },
@@ -92,6 +109,8 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   loadError: null,
   paletteId: DEFAULT_PALETTE_ID,
   classification: 'quantile',
+  isPlaying: false,
+  cinemaMode: false,
 
   ingest: (rows) => {
     const { nodes, edges } = buildFromRows(rows);
@@ -101,6 +120,9 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       nodes, edgesRaw: edges, scales, meta: null,
       topN: Math.min(DEFAULT_TOPN_CAP, edges.length),
       maxTopN: edges.length,
+      selectedNodeId: null,
+      isPlaying: false,
+      cinemaMode: false,
     });
   },
 
@@ -119,7 +141,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     const scales = computeLayouts(nodes, edges, w, h, getPalette(get().paletteId).colors, get().classification);
     // The backend already applies top_n / H3 clustering server-side, so
     // whatever it hands back is meant to be shown as-is.
-    set({ nodes, edgesRaw: edges, scales, meta, topN: edges.length, maxTopN: Math.max(edges.length, get().maxTopN) });
+    set({ nodes, edgesRaw: edges, scales, meta, topN: edges.length, maxTopN: Math.max(edges.length, get().maxTopN), selectedNodeId: null, isPlaying: false, cinemaMode: false });
   },
 
   ingestFromFile: (file) => {
@@ -147,6 +169,9 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         topN: Math.min(DEFAULT_TOPN_CAP, msg.edges.length),
         maxTopN: msg.edges.length,
         loading: false, loadError: null,
+        selectedNodeId: null,
+      isPlaying: false,
+      cinemaMode: false,
       });
       worker.terminate();
     };
@@ -184,13 +209,30 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   setDatasetId: (id) => set({ datasetId: id }),
   setBackendMode: (b) => set({ backendMode: b }),
   setGeo3D: (b) => set({ geo3D: b }),
+  setSelectedNode: (id) => set({ selectedNodeId: id }),
   setPalette: (id) => {
     set({ paletteId: id });
+    get().recomputeLayouts();
+  },
+  cyclePalette: (dir) => {
+    const { paletteId } = get();
+    const i = PALETTES.findIndex((p) => p.id === paletteId);
+    const next = PALETTES[(i + dir + PALETTES.length) % PALETTES.length];
+    set({ paletteId: next.id });
     get().recomputeLayouts();
   },
   setClassification: (m) => {
     set({ classification: m });
     get().recomputeLayouts();
+  },
+  setIsPlaying: (b) => set({ isPlaying: b }),
+  stepTopN: (delta) => {
+    const { topN, maxTopN } = get();
+    set({ topN: Math.min(maxTopN, Math.max(1, topN + delta)) });
+  },
+  setCinemaMode: (b) => {
+    if (b) set({ cinemaMode: true, mode: 'geo', geo3D: true });
+    else set({ cinemaMode: false });
   },
 }));
 
